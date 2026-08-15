@@ -1,0 +1,17 @@
+{
+  "name": "gamelib",
+  "version": "0.1.0",
+  "description": "Steam-like personal game library and save cloud over SSH",
+  "main": "src/main.js",
+  "bin": {
+    "gamelib": "bin/gamelib"
+  },
+  "scripts": {
+    "start": "electron .",
+    "cli": "node src/cli.js"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.2.1"
+  }
+}

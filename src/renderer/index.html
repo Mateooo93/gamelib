@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; img-src 'self' data:; script-src 'self'">
+  <title>Gamelib</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="brand">
+        <div class="brand-logo">GL</div>
+        <div class="brand-name">GAMELIB</div>
+      </div>
+      <nav>
+        <button class="nav-item active" data-view="library">Library</button>
+        <button class="nav-item" data-view="settings">Settings</button>
+      </nav>
+      <div class="sidebar-foot">
+        <div id="conn-chip" class="conn-chip off"><span class="dot"></span><span id="conn-text">offline</span></div>
+      </div>
+    </aside>
+
+    <main id="content">
+      <section id="view-library" class="view">
+        <header class="topbar">
+          <div>
+            <h1 id="lib-title">Library</h1>
+            <p id="lib-sub" class="sub"></p>
+          </div>
+          <div class="topbar-actions">
+            <button id="btn-refresh" class="btn ghost" title="Refresh">Refresh</button>
+            <button id="btn-addgame" class="btn primary">+ Add game</button>
+          </div>
+        </header>
+        <div id="game-grid" class="grid"></div>
+        <div id="empty-hint" class="empty hidden">Nothing here yet — click “+ Add game” to publish your first game.</div>
+      </section>
+
+      <section id="view-settings" class="view hidden">
+        <header class="topbar">
+          <div>
+            <h1>Settings</h1>
+            <p class="sub">Server connection and this machine's identity</p>
+          </div>
+        </header>
+        <form id="settings-form" class="panel form">
+          <label>Server host
+            <input id="set-host" type="text" placeholder="1.2.3.4" spellcheck="false">
+          </label>
+          <label>User
+            <input id="set-user" type="text" placeholder="opc" spellcheck="false">
+          </label>
+          <label>Port
+            <input id="set-port" type="number" value="22" min="1" max="65535">
+          </label>
+          <label>Machine name
+            <input id="set-machine" type="text" spellcheck="false">
+          </label>
+          <div class="form-row">
+            <button type="submit" class="btn primary">Save &amp; reconnect</button>
+            <span id="cfg-path" class="muted"></span>
+          </div>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <div id="toasts"></div>
+
+  <div id="modal-bg" class="hidden">
+    <div class="modal">
+      <h2 id="modal-title">Add game</h2>
+      <form id="game-form" class="form">
+        <label>Game ID (url-safe, e.g. <code>sandustry</code>)
+          <input id="gf-id" type="text" pattern="[A-Za-z0-9._-]+" required spellcheck="false">
+        </label>
+        <label>Display name
+          <input id="gf-name" type="text" spellcheck="false">
+        </label>
+        <label>Game folder on this machine
+          <div class="pick-row">
+            <input id="gf-folder" type="text" spellcheck="false" placeholder="/path/to/game">
+            <button type="button" class="btn ghost" id="gf-pick">Browse…</button>
+          </div>
+        </label>
+        <label>Launch command (run inside the game folder)
+          <input id="gf-launch" type="text" spellcheck="false" placeholder="./Sandustry.sh">
+        </label>
+        <label>Save folders (one per line, this machine)
+          <textarea id="gf-saves" rows="3" spellcheck="false" placeholder="~/.config/sandustry/saves&#10;~/.config/sandustry/meta"></textarea>
+        </label>
+        <div class="form-row">
+          <button type="submit" class="btn primary" id="gf-ok">Add to library</button>
+          <button type="button" class="btn ghost" id="gf-cancel">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
