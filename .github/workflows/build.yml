@@ -54,3 +54,5 @@ jobs:
             dist/*.dmg
             dist/*.zip
           if-no-files-found: error
+
+# triggers: manual (workflow_dispatch) or v* tags
