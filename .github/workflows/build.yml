@@ -1,0 +1,56 @@
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x64
+          - os: windows-latest
+            arch: x64
+          - os: macos-13
+            arch: x64
+          - os: macos-latest
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build (macOS x64/arm64)
+        if: startsWith(matrix.os, 'macos')
+        run: npx electron-builder --mac --x64 --arm64
+
+      - name: Build (Linux x64)
+        if: matrix.os == 'ubuntu-latest'
+        run: npx electron-builder --linux
+
+      - name: Build (Windows x64)
+        if: matrix.os == 'windows-latest'
+        run: npx electron-builder --win
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gamelib-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            dist/*.AppImage
+            dist/*.tar.gz
+            dist/*.exe
+            dist/*.dmg
+            dist/*.zip
+          if-no-files-found: error
