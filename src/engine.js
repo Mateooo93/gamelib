@@ -339,6 +339,9 @@ async function savePush(cfg, gameId) {
   const id = validate(gameId);
   const local = localSaveState(cfg, id);
   if (local.missing.length) throw new GamelibError(`save dirs missing locally: ${local.missing.join(', ')}`);
+  // Guard: two configured dirs may resolve to the same real folder (e.g.
+  // symlinked alias) — archiving it once prevents duplicate junk snapshots.
+  local.dirs = [...new Set(local.dirs)];
   const ts = snapshotTs();
   const base = `saves/${id}/${ts}`;
   const meta = {
