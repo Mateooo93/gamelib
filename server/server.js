@@ -66,9 +66,18 @@ function streamPut(req, res, target) {
   const tmp = target + '.tmp.' + process.pid;
   const out = fs.createWriteStream(tmp);
   req.pipe(out);
+  const cleanup = () => {
+    fs.rmSync(tmp, { force: true });
+    // A snapshot dir with no payload is an aborted upload — remove it so it
+    // can never become the "latest" that clients try to pull.
+    try {
+      const dir = path.dirname(target);
+      if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
+    } catch { /* best effort */ }
+  };
   out.on('finish', () => fs.renameSync(tmp, target));
-  out.on('error', (e) => { fs.rmSync(tmp, { force: true }); send(res, 500, { error: e.message }); });
-  req.on('error', (e) => { fs.rmSync(tmp, { force: true }); send(res, 500, { error: e.message }); });
+  out.on('error', (e) => { cleanup(); send(res, 500, { error: e.message }); });
+  req.on('error', (e) => { cleanup(); send(res, 500, { error: e.message }); });
   req.on('end', () => {
     if (!res.headersSent) send(res, 200, { ok: true });
   });
@@ -168,6 +177,16 @@ function prune() {
     for (const extra of snaps.slice(SNAPSHOT_LIMIT)) {
       fs.rmSync(path.join(dir, extra), { recursive: true, force: true });
       console.log(`pruned ${g}/${extra}`);
+    }
+    // Aborted uploads leave an empty dir with no payload — drop it.
+    for (const snap of snaps) {
+      const p = path.join(dir, snap);
+      try {
+        if (fs.readdirSync(p).length === 0) {
+          fs.rmdirSync(p);
+          console.log(`removed empty snapshot ${g}/${snap}`);
+        }
+      } catch { /* not a dir or busy */ }
     }
   }
 }

@@ -21,6 +21,26 @@ const transport = require('./transport');
 const GAME_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 const SNAPSHOT_LIMIT = 20;            // snapshots kept per game
 const SAVE_CLOCK_TOLERANCE_MS = 120_000; // cross-machine clock tolerance
+// Entries that should NEVER appear inside a game save folder — if one shows
+// up, the profile got nested inside itself (bad config / bad pull) and
+// syncing would just spread the mess further.
+const PROFILE_JUNK = ['GPUCache', 'Code Cache', 'Network', 'Local Storage', 'blob_storage',
+  'shared_proto_db', 'DawnGraphiteCache', 'DawnWebGPUCache', 'saves', 'custom_maps', 'meta'];
+
+function assertCleanSaveDirs(dirs) {
+  for (const d of dirs) {
+    const root = resolveDir(d);
+    if (!root) continue;
+    let entries;
+    try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { continue; }
+    const bad = entries.find((e) => e.isDirectory() && PROFILE_JUNK.includes(e.name));
+    if (bad) {
+      throw new GamelibError(
+        `save folder ${d} contains a nested profile folder (${bad.name}) — refusing to sync. ` +
+        `Clean the folder (keep only real save files) and try again.`);
+    }
+  }
+}
 
 class GamelibError extends Error {}
 
@@ -90,9 +110,14 @@ async function listSnapshots(cfg, gameId) {
 
 async function latestSnapshotMeta(cfg, gameId) {
   const snaps = await listSnapshots(cfg, gameId);
-  if (!snaps.length) return null;
-  const r = await transport.api(cfg, 'GET', `/api/saves/${validate(gameId)}/${snaps[0]}/meta.json`, { json: true });
-  return { ts: snaps[0], ...r };
+  for (const ts of snaps) {
+    // Walk newest-first; a snapshot with no meta/tar is a broken upload —
+    // skip it instead of failing the whole sync.
+    const r = await transport.api(cfg, 'GET', `/api/saves/${validate(gameId)}/${ts}/meta.json`, { json: true }).catch(() => null);
+    if (r && typeof r === 'object' && r.error) continue;
+    return { ts, ...r };
+  }
+  return null;
 }
 
 async function pruneSnapshots(cfg, gameId) {
@@ -216,6 +241,7 @@ async function savePush(cfg, gameId) {
   const id = validate(gameId);
   const local = localSaveState(cfg, id);
   if (local.missing.length) throw new GamelibError(`save dirs missing locally: ${local.missing.join(', ')}`);
+  assertCleanSaveDirs(local.dirs);
   const ts = snapshotTs();
   const base = `saves/${id}/${ts}`;
   const meta = {
@@ -249,18 +275,28 @@ async function savePush(cfg, gameId) {
 async function savePull(cfg, gameId, { backupLocal = true } = {}) {
   const id = validate(gameId);
   const local = localSaveState(cfg, id);
-  if (local.missing.length) throw new GamelibError(`save dirs missing locally: ${local.missing.join(', ')}`);
+  // Fresh machines may not have the save folders yet — create them so a pull
+  // can land, instead of silently skipping (which produced "save doesn't appear").
+  for (const miss of local.missing) {
+    try { fs.mkdirSync(expandPath(miss), { recursive: true }); }
+    catch (e) { throw new GamelibError(`cannot create save dir ${miss}: ${e.message}`); }
+  }
   const cloud = await latestSnapshotMeta(cfg, id);
   if (!cloud) throw new GamelibError(`no cloud saves for '${id}' yet`);
+  assertCleanSaveDirs([...local.dirs, ...local.missing.map((m) => expandPath(m))]);
 
+  // If local progress looks newer, preserve it as a snapshot — but restore
+  // the PRE-backup latest afterwards, so a backup push never becomes the
+  // "newest" we pull back (that hid cloud saves on other machines).
+  const target = cloud;
   if (backupLocal && local.newestLocal > (cloud.pushedLocalMtime || 0) + SAVE_CLOCK_TOLERANCE_MS) {
     await savePush(cfg, id); // never lose unsynced local progress
   }
 
-  const tmp = path.join(os.tmpdir(), `gamelib-save-${id}-${cloud.ts}.tar.gz`);
+  const tmp = path.join(os.tmpdir(), `gamelib-save-${id}-${target.ts}.tar.gz`);
   try {
-    await transport.downloadFile(cfg, `/api/saves/${id}/${cloud.ts}/saves.tar.gz`, tmp);
-    for (const d of local.dirs) {
+    await transport.downloadFile(cfg, `/api/saves/${id}/${target.ts}/saves.tar.gz`, tmp);
+    for (const d of [...local.dirs, ...local.missing.map((m) => expandPath(m))]) {
       const dest = resolveDir(d);
       if (!dest) throw new GamelibError(`save dir unavailable: ${d}`);
       await new Promise((resolve, reject) => {
@@ -273,7 +309,7 @@ async function savePull(cfg, gameId, { backupLocal = true } = {}) {
   } finally {
     fs.rmSync(tmp, { force: true });
   }
-  return { snapshot: cloud.ts, from: cloud.machine };
+  return { snapshot: target.ts, from: target.machine };
 }
 
 async function publishGame(cfg, gameId, dir, { name, os } = {}) {
