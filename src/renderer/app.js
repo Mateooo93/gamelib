@@ -218,6 +218,7 @@ function fillSettings() {
   $('#set-password').value = cfg.server.password || '';
   $('#set-port').value = cfg.server.port || 8443;
   $('#set-machine').value = cfg.machine || '';
+  $('#set-ghtoken').value = cfg.githubToken || '';
   $('#cfg-path').textContent = state.configPath || '';
 }
 
@@ -230,6 +231,7 @@ $('#settings-form').addEventListener('submit', async (ev) => {
       port: Number($('#set-port').value) || 8443,
     },
     machine: $('#set-machine').value.trim(),
+    githubToken: $('#set-ghtoken').value.trim() || undefined,
   });
   if (!r.ok) return toast('Could not save', r.error, 'error');
   state.cfg = r.cfg;

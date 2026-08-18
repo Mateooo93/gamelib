@@ -6,6 +6,7 @@
 // authenticated AND encrypted without a public CA.
 
 const https = require('node:https');
+const tls = require('node:tls');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -19,6 +20,44 @@ function certPath() {
   return path.join(configDir(), 'server-cert.pem');
 }
 
+// Trust-on-first-use: fetch + pin the daemon's self-signed cert once, the
+// way ssh handles known_hosts. Afterwards every connection verifies against
+// the pinned copy, so an impostor server gets rejected.
+function fetchAndPinCert(cfg) {
+  const s = cfg.server || {};
+  return new Promise((resolve, reject) => {
+    const { isIP } = require('node:net');
+    const socket = tls.connect({
+      host: s.host, port: s.port || 8443,
+      rejectUnauthorized: false,
+      ...(isIP(s.host) ? {} : { servername: s.host }),
+    }, () => {
+      const cert = socket.getPeerCertificate();
+      if (!cert || !cert.raw) {
+        socket.destroy();
+        return reject(new TransportError('could not read the server certificate'));
+      }
+      const b64 = cert.raw.toString('base64').match(/.{1,64}/g).join('\n');
+      const pem = `-----BEGIN CERTIFICATE-----\n${b64}\n-----END CERTIFICATE-----\n`;
+      try {
+        fs.mkdirSync(configDir(), { recursive: true });
+        fs.writeFileSync(certPath(), pem);
+        socket.destroy();
+        resolve(pem);
+      } catch (e) {
+        socket.destroy();
+        reject(new TransportError(`could not save server certificate: ${e.message}`));
+      }
+    });
+    socket.on('error', (e) => reject(new TransportError(`could not fetch server certificate from ${s.host}:${s.port}: ${e.message}`)));
+  });
+}
+
+function ensureCert(cfg) {
+  if (!fs.existsSync(certPath())) return fetchAndPinCert(cfg);
+  return Promise.resolve(fs.readFileSync(certPath()));
+}
+
 function baseUrl(cfg) {
   const s = cfg.server || {};
   return `https://${s.host}:${s.port || 8443}`;
@@ -29,11 +68,8 @@ function request(cfg, method, apiPath, { body } = {}) {
   if (!s.host) return Promise.reject(new TransportError('no server configured — fill Settings'));
   if (!s.password) return Promise.reject(new TransportError('no server password configured — fill Settings'));
   const url = new URL(baseUrl(cfg) + apiPath);
-  const ca = fs.existsSync(certPath()) ? fs.readFileSync(certPath()) : null;
-  if (!ca) return Promise.reject(new TransportError(`server certificate not found at ${certPath()} — run the server setup first`));
-
   const payload = body != null ? Buffer.from(String(body)) : null;
-  return new Promise((resolve, reject) => {
+  return ensureCert(cfg).then((ca) => new Promise((resolve, reject) => {
     const req = https.request(url, {
       method,
       ca,
@@ -62,7 +98,7 @@ function request(cfg, method, apiPath, { body } = {}) {
     }));
     if (payload) req.write(payload);
     req.end();
-  });
+  }));
 }
 
 async function api(cfg, method, apiPath, { json, body } = {}) {
@@ -76,13 +112,11 @@ async function api(cfg, method, apiPath, { json, body } = {}) {
 }
 
 function uploadFile(cfg, apiPath, filePath) {
-  return new Promise((resolve, reject) => {
-    const s = cfg.server || {};
-    const url = new URL(baseUrl(cfg) + apiPath);
-    const ca = fs.existsSync(certPath()) ? fs.readFileSync(certPath()) : null;
-    if (!ca) return reject(new TransportError(`server certificate not found at ${certPath()} — run the server setup first`));
-    let size = 0;
-    try { size = fs.statSync(filePath).size; } catch (e) { return reject(new TransportError(`upload source missing: ${filePath}`)); }
+  const s = cfg.server || {};
+  const url = new URL(baseUrl(cfg) + apiPath);
+  let size = 0;
+  try { size = fs.statSync(filePath).size; } catch (e) { return Promise.reject(new TransportError(`upload source missing: ${filePath}`)); }
+  return ensureCert(cfg).then((ca) => new Promise((resolve, reject) => {
     const req = https.request(url, {
       method: 'PUT',
       ca,
@@ -100,7 +134,7 @@ function uploadFile(cfg, apiPath, filePath) {
         : resolve()));
     });
     fs.createReadStream(filePath).pipe(req);
-  });
+  }));
 }
 
 function downloadTo(cfg, apiPath, sink) {

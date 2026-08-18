@@ -70,10 +70,11 @@ ipcMain.handle('cfg:get', () => {
   return ok({ cfg, configPath: engine.defaultConfigPath(), os: process.platform });
 });
 
-ipcMain.handle('cfg:save', wrap(async ({ server, machine }) => {
+ipcMain.handle('cfg:save', wrap(async ({ server, machine, githubToken }) => {
   const cfg = engine.loadConfig();
-  if (server) cfg.server = { port: 22, ...cfg.server, ...server };
+  if (server) cfg.server = { port: 8443, ...cfg.server, ...server };
   if (machine) cfg.machine = machine;
+  if (githubToken !== undefined) cfg.githubToken = githubToken || undefined;
   engine.saveConfig(cfg);
   return { cfg };
 }));
