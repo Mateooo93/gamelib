@@ -53,4 +53,24 @@ jobs:
             dist/*.zip
           if-no-files-found: error
 
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la artifacts/
+          gh release create "${GITHUB_REF_NAME}" artifacts/* --generate-notes \
+            || gh release upload "${GITHUB_REF_NAME}" artifacts/* --clobber
+
 # triggers: manual (workflow_dispatch) or v* tags
