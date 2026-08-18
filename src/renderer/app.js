@@ -52,7 +52,7 @@ function setConn(on, status) {
   const chip = $('#conn-chip');
   chip.className = `conn-chip ${on ? 'on' : 'off'}`;
   $('#conn-text').textContent = on
-    ? `connected · ${status.server.user || ''}@${status.server.host}`
+    ? `connected · ${status.server.host}:${status.server.port || 8443}`
     : 'offline';
 }
 function setConnBusy() {
