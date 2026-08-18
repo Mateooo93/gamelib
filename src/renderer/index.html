@@ -30,6 +30,7 @@
             <p id="lib-sub" class="sub"></p>
           </div>
           <div class="topbar-actions">
+            <button id="btn-update" class="btn hidden" title="A new Gamelib version is available">? Update</button>
             <button id="btn-refresh" class="btn ghost" title="Refresh">Refresh</button>
             <button id="btn-addgame" class="btn primary">+ Add game</button>
           </div>
@@ -49,11 +50,11 @@
           <label>Server host
             <input id="set-host" type="text" placeholder="1.2.3.4" spellcheck="false">
           </label>
-          <label>User
-            <input id="set-user" type="text" placeholder="opc" spellcheck="false">
+          <label>Server password
+            <input id="set-password" type="password" placeholder="••••••••" spellcheck="false" autocomplete="off">
           </label>
           <label>Port
-            <input id="set-port" type="number" value="22" min="1" max="65535">
+            <input id="set-port" type="number" value="8443" min="1" max="65535">
           </label>
           <label>Machine name
             <input id="set-machine" type="text" spellcheck="false">

@@ -6,6 +6,13 @@ const path = require('node:path');
 const os = require('node:os');
 const engine = require('./engine');
 
+// Stability for packaged + dev startups on hybrid/Wayland desktops:
+// this is a flat UI — skip the GPU process (avoids the Chromium
+// "GPU process isn't usable" hard-exit) and prefer native Wayland over
+// the fragile Xwayland bridge.
+app.commandLine.appendSwitch('disable-gpu');
+app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
+
 let win = null;
 const send = (channel, payload) => {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
@@ -137,3 +144,38 @@ ipcMain.handle('shell:open', wrap(async ({ dir }) => {
   else execFile('xdg-open', [dir]);
   return { dir };
 }));
+
+// --- updates -------------------------------------------------------------
+
+const updater = require('./updater');
+
+ipcMain.handle('update:check', async () => {
+  try {
+    const cfg = engine.loadConfig();
+    const info = await updater.checkUpdate(app.getVersion(), { token: cfg.githubToken });
+    return ok(info);
+  } catch (err) {
+    return fail(err);
+  }
+});
+
+ipcMain.handle('update:download', async (_e, { url }) => {
+  const destDir = process.platform === 'win32'
+    ? path.join(process.env.USERPROFILE || os.homedir(), 'Downloads')
+    : path.join(os.homedir(), 'Downloads');
+  const cfg = engine.loadConfig();
+  try {
+    const file = await updater.download(url, destDir, {
+      onProgress: (p) => send('update:progress', p),
+      token: cfg.githubToken,
+    });
+    return ok({ file });
+  } catch (err) {
+    return fail(err);
+  }
+});
+
+ipcMain.handle('update:reveal', (_e, { file }) => {
+  try { shell.showItemInFolder(file); } catch (_) { /* ignore */ }
+  return ok({});
+});

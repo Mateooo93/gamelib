@@ -215,8 +215,8 @@ function fillSettings() {
   const cfg = state.cfg;
   if (!cfg) return;
   $('#set-host').value = cfg.server.host || '';
-  $('#set-user').value = cfg.server.user || '';
-  $('#set-port').value = cfg.server.port || 22;
+  $('#set-password').value = cfg.server.password || '';
+  $('#set-port').value = cfg.server.port || 8443;
   $('#set-machine').value = cfg.machine || '';
   $('#cfg-path').textContent = state.configPath || '';
 }
@@ -224,7 +224,11 @@ function fillSettings() {
 $('#settings-form').addEventListener('submit', async (ev) => {
   ev.preventDefault();
   const r = await api.cfgSave({
-    server: { host: $('#set-host').value.trim(), user: $('#set-user').value.trim(), port: Number($('#set-port').value) || 22 },
+    server: {
+      host: $('#set-host').value.trim(),
+      password: $('#set-password').value,
+      port: Number($('#set-port').value) || 8443,
+    },
     machine: $('#set-machine').value.trim(),
   });
   if (!r.ok) return toast('Could not save', r.error, 'error');
@@ -248,6 +252,60 @@ document.querySelectorAll('.nav-item').forEach((btn) => {
 
 $('#btn-refresh').addEventListener('click', () => refresh(false));
 
+/* ---------- update button ---------- */
+
+let updateInfo = null;
+let updateDownloading = false;
+
+async function checkForUpdate(quiet = false) {
+  try {
+    const r = await api.updateCheck();
+    updateInfo = r.ok ? r : null;
+  } catch (_) {
+    updateInfo = null;
+  }
+  const btn = $('#btn-update');
+  if (updateInfo && updateInfo.available && !updateDownloading) {
+    btn.textContent = `⬆ Update ${updateInfo.latestVersion.replace(/^v/, '')}`;
+    btn.classList.remove('hidden');
+  } else {
+    btn.classList.add('hidden');
+  }
+}
+
+$('#btn-update').addEventListener('click', async () => {
+  if (!updateInfo || updateDownloading) return;
+  const asset = updateInfo.asset;
+  if (!asset) return toast('Update', 'No installer asset found for this platform.', 'error');
+  if (!confirm(`Gamelib ${updateInfo.latestVersion.replace(/^v/, '')} is available.\n\nDownload and open the installer in your Downloads folder?`)) return;
+  updateDownloading = true;
+  const btn = $('#btn-update');
+  btn.disabled = true;
+  btn.textContent = 'Downloading…';
+  try {
+    const r = await api.updateDownload(asset.url);
+    if (!r.ok) throw new Error(r.error);
+    btn.textContent = `Saved to Downloads`;
+    toast('Update downloaded', r.file, 'ok');
+    api.updateReveal(r.file);
+  } catch (e) {
+    toast('Update download failed', e.message, 'error');
+    btn.textContent = `⬆ Update ${updateInfo.latestVersion.replace(/^v/, '')}`;
+  } finally {
+    updateDownloading = false;
+    btn.disabled = false;
+    setTimeout(() => { if (!updateDownloading) btn.classList.add('hidden'); }, 2500);
+  }
+});
+
+api.onUpdateProgress((p) => {
+  const btn = $('#btn-update');
+  if (updateDownloading && p.total) {
+    const pct = Math.round((p.received / p.total) * 100);
+    btn.textContent = `Downloading… ${pct}%`;
+  }
+});
+
 api.onEvent((ev) => {
   if (ev.phase === 'playing') toast(`${ev.id} launched`, 'Sync on exit — close the game when done.');
   else if (ev.message) toast(`${ev.id}`, ev.message);
@@ -265,4 +323,5 @@ api.onEvent((ev) => {
   } catch (e) {
     toast('Startup failed', e.message, 'error');
   }
+  checkForUpdate(true);
 })();

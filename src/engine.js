@@ -1,22 +1,22 @@
 'use strict';
-// Gamelib engine — Steam-like game library + cloud saves over plain SSH.
+// Gamelib engine — Steam-like game library + cloud saves over HTTPS.
 // Pure Node (no Electron imports) so the CLI and the GUI share this code path.
 //
-// Transport: system `ssh` + `tar`/`cat` streams. On Windows the OpenSSH client
-// and bsdtar ship with the OS, so no extra installs are needed anywhere.
+// Transport: the gamelib daemon on the server (server/server.js). Auth is a
+// bearer password; TLS is pinned to the daemon's self-signed cert
+// (server-cert.pem next to the config). Files are moved with tar over the
+// API — on Windows the bundled tar handles extraction, nothing extra to install.
 //
-// Server layout (~/gamelib on the remote):
-//   library.json                  game registry (name, platforms, updatedAt)
+// Server layout (dataDir on the remote, default ~/gamelib):
+//   library.json                  game registry
 //   games/<id>/<osTag>.tar        published game payload per platform
 //   saves/<id>/<timestamp>/       save snapshots: saves.tar.gz + meta.json
-//
-// Everything on the wire is driven by validated ids only (GAME_ID_RE), so the
-// remote commands are fixed templates with no user-input interpolation.
 
-const { spawn, execFile } = require('node:child_process');
+const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const transport = require('./transport');
 
 const GAME_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 const SNAPSHOT_LIMIT = 20;            // snapshots kept per game
@@ -41,7 +41,7 @@ function loadConfig(file = defaultConfigPath()) {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch {
-    return { server: { host: '', user: '', port: 22 }, machine: os.hostname(), games: {} };
+    return { server: { host: '', port: 8443, password: '' }, machine: os.hostname(), games: {} };
   }
 }
 
@@ -58,7 +58,7 @@ function expandPath(p) {
   return s;
 }
 
-// Real path of a (possibly symlinked, e.g. USB-stick) directory.
+// Real path of a (possibly symlinked) directory.
 function resolveDir(p) {
   const expanded = expandPath(p);
   try {
@@ -68,143 +68,43 @@ function resolveDir(p) {
   }
 }
 
-function sshArgs(cfg) {
-  const { host, user, port } = cfg.server;
-  const target = user ? `${user}@${host}` : host;
-  const args = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'StrictHostKeyChecking=accept-new'];
-  if (port && port !== 22) args.push('-p', String(port));
-  args.push(target);
-  return args;
-}
-
-function remoteBase(cfg) {
-  return `gamelib`;
-}
-
 function validate(gameId) {
   if (!GAME_ID_RE.test(gameId)) throw new GamelibError(`invalid game id: ${gameId}`);
   return gameId;
 }
 
-// --- ssh helpers -----------------------------------------------------------
-
-function runSSH(cfg, remoteArgs, { input } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn('ssh', [...sshArgs(cfg), ...remoteArgs], { stdio: ['pipe', 'pipe', 'pipe'] });
-    let out = '', err = '';
-    child.stdout.on('data', (d) => (out += d));
-    child.stderr.on('data', (d) => (err += d));
-    child.on('error', (e) => reject(new GamelibError(`ssh not available: ${e.message}`)));
-    child.on('close', (code) => resolve({ code, stdout: out, stderr: err }));
-    if (input != null) child.stdin.end(input);
-    else child.stdin.end();
-  });
-}
-
-async function ensureServer(cfg) {
-  const base = remoteBase(cfg);
-  const mk = await runSSH(cfg, [`mkdir -p ${base}/games ${base}/saves ${base}/meta`]);
-  if (mk.code !== 0) throw new GamelibError(`server mkdir failed: ${mk.stderr || mk.stdout}`);
-  const has = await runSSH(cfg, [`test -f ${base}/library.json && echo yes || echo no`]);
-  if (has.stdout.trim() !== 'yes') {
-    const seed = JSON.stringify({ version: 1, games: {} });
-    const b64 = Buffer.from(seed).toString('base64');
-    const w = await runSSH(cfg, [`echo ${b64} | base64 -d > ${base}/library.json`]);
-    if (w.code !== 0) throw new GamelibError(`could not seed library.json: ${w.stderr}`);
-  }
-}
+// --- remote helpers -------------------------------------------------------
 
 async function readLibrary(cfg) {
-  await ensureServer(cfg);
-  const res = await runSSH(cfg, [`cat ${remoteBase(cfg)}/library.json`]);
-  if (res.code !== 0) throw new GamelibError(`library read failed: ${res.stderr}`);
-  try {
-    return JSON.parse(res.stdout);
-  } catch {
-    throw new GamelibError('library.json on server is corrupt');
-  }
+  return transport.api(cfg, 'GET', '/api/library', { json: true });
 }
 
 async function writeLibrary(cfg, lib) {
-  const b64 = Buffer.from(JSON.stringify(lib, null, 2)).toString('base64');
-  const res = await runSSH(cfg, [`echo ${b64} | base64 -d > ${remoteBase(cfg)}/library.json`]);
-  if (res.code !== 0) throw new GamelibError(`library write failed: ${res.stderr}`);
+  await transport.api(cfg, 'PUT', '/api/library', { body: JSON.stringify(lib, null, 2) });
 }
 
-// --- streams ---------------------------------------------------------------
-
-function pushTar(cfg, localPath, remoteFile, { compress }) {
-  const src = resolveDir(localPath);
-  if (!src) throw new GamelibError(`local path not found: ${localPath}`);
-  const parent = path.dirname(src);
-  const name = path.basename(src);
-  const flags = compress ? '-czhf' : '-chf';
-  return new Promise((resolve, reject) => {
-    const local = spawn('tar', [flags, '-', '-C', parent, name], { stdio: ['ignore', 'pipe', 'pipe'] });
-    const remote = spawn('ssh', [...sshArgs(cfg), `mkdir -p ${remoteBase(cfg)}/${remoteFile.replace(/\/[^/]+$/, '')} && cat > ${remoteBase(cfg)}/${remoteFile}`],
-      { stdio: ['pipe', 'pipe', 'pipe'] });
-    let lerr = '', rerr = '';
-    local.stderr.on('data', (d) => (lerr += d));
-    remote.stderr.on('data', (d) => (rerr += d));
-    local.stdout.pipe(remote.stdin);
-    remote.on('error', (e) => reject(new GamelibError(`ssh error: ${e.message}`)));
-    local.on('error', (e) => { remote.kill(); reject(new GamelibError(`tar error: ${e.message}`)); });
-    let done = 0, rc = 0, msg = '';
-    const finish = (code, err) => { rc = Math.max(rc, code); msg += err; if (++done === 2) (rc === 0 ? resolve() : reject(new GamelibError(`push failed: ${msg.trim() || 'unknown'}`))); };
-    local.on('close', (c) => finish(c, lerr));
-    remote.on('close', (c) => finish(c, rerr));
-  });
+async function listSnapshots(cfg, gameId) {
+  const r = await transport.api(cfg, 'GET', `/api/saves/${validate(gameId)}`, { json: true });
+  return (r.snapshots || []).filter((s) => typeof s === 'string');
 }
 
-function pullStream(cfg, sink, remoteCommand) {
-  return new Promise((resolve, reject) => {
-    const remote = spawn('ssh', [...sshArgs(cfg), remoteCommand], { stdio: ['pipe', 'pipe', 'pipe'] });
-    let err = '', failed = null;
-    remote.stderr.on('data', (d) => (err += d));
-    remote.on('error', (e) => reject(new GamelibError(`ssh error: ${e.message}`)));
-    remote.stdout.pipe(sink.stdin); // ssh stdout -> local tar stdin
-    let done = 0;
-    const finish = () => {
-      if (++done === 2) {
-        if (failed) reject(new GamelibError(`pull failed: ${failed}`));
-        else resolve();
-      }
-    };
-    remote.on('close', (code) => { if (code !== 0 && !failed) failed = err.trim() || `ssh exit ${code}`; finish(); });
-    sink.on('error', (e) => { if (!failed) failed = e.message; remote.kill(); finish(); });
-    sink.on('close', (code) => { if (code !== 0 && !failed) failed = `local exit ${code}`; finish(); });
-  });
+async function latestSnapshotMeta(cfg, gameId) {
+  const snaps = await listSnapshots(cfg, gameId);
+  if (!snaps.length) return null;
+  const r = await transport.api(cfg, 'GET', `/api/saves/${validate(gameId)}/${snaps[0]}/meta.json`, { json: true });
+  return { ts: snaps[0], ...r };
 }
 
-function pullTar(cfg, remoteTarArgs, destDir, { compress }) {
-  const flags = compress ? '-xzf' : '-xf';
-  const local = spawn('tar', [flags, '-', '--strip-components=1', '-C', destDir], { stdio: ['pipe', 'pipe', 'pipe'] });
-  let lerr = '';
-  local.stderr.on('data', (d) => (lerr += d));
-  return pullStream(cfg, local, remoteTarArgs).catch((e) => {
-    e.message += lerr.trim() ? ` (${lerr.trim()})` : '';
-    throw e;
-  });
+async function pruneSnapshots(cfg, gameId) {
+  const snaps = await listSnapshots(cfg, gameId);
+  const extra = snaps.slice(SNAPSHOT_LIMIT);
+  for (const ts of extra) {
+    await transport.api(cfg, 'DELETE', `/api/saves/${validate(gameId)}/${ts}`);
+  }
+  return extra.length;
 }
 
-function pullFile(cfg, remoteFile, localPath) {
-  return new Promise((resolve, reject) => {
-    fs.mkdirSync(path.dirname(localPath), { recursive: true });
-    const remote = spawn('ssh', [...sshArgs(cfg), `cat ${remoteBase(cfg)}/${remoteFile}`], { stdio: ['pipe', 'pipe', 'pipe'] });
-    const out = fs.createWriteStream(localPath);
-    let err = '';
-    remote.stderr.on('data', (d) => (err += d));
-    remote.stdout.pipe(out);
-    remote.on('close', (code) => (code === 0 ? resolve() : reject(new GamelibError(`download failed: ${err.trim()}`))));
-  });
-}
-
-function writeRemoteFile(cfg, remoteFile, content) {
-  const b64 = Buffer.from(String(content)).toString('base64');
-  return runSSH(cfg, [`echo ${b64} | base64 -d > ${remoteBase(cfg)}/${remoteFile}`]);
-}
-
-// --- save snapshots ---------------------------------------------------------
+// --- local helpers ----------------------------------------------------------
 
 function newestFileMtime(dir) {
   const root = resolveDir(dir);
@@ -230,30 +130,6 @@ function snapshotTs(d = new Date()) {
   return d.toISOString().replace(/[:.]/g, '-').replace(/\.\d+-/, '-').replace(/-00:00Z$|Z$/, 'Z');
 }
 
-async function listSnapshots(cfg, gameId) {
-  const res = await runSSH(cfg, [`ls ${remoteBase(cfg)}/saves/` + validate(gameId) + ` 2>/dev/null || true`]);
-  return res.stdout.split('\n').map((s) => s.trim()).filter((s) => /^[0-9TZ-]+$/.test(s)).sort().reverse();
-}
-
-async function latestSnapshotMeta(cfg, gameId) {
-  const snaps = await listSnapshots(cfg, gameId);
-  if (!snaps.length) return null;
-  const res = await runSSH(cfg, [`cat ${remoteBase(cfg)}/saves/${validate(gameId)}/${snaps[0]}/meta.json 2>/dev/null || echo '{}'`]);
-  try { return { ts: snaps[0], ...JSON.parse(res.stdout) }; } catch { return { ts: snaps[0] }; }
-}
-
-async function pruneSnapshots(cfg, gameId) {
-  const snaps = await listSnapshots(cfg, gameId);
-  const extra = snaps.slice(SNAPSHOT_LIMIT);
-  for (const ts of extra) {
-    await runSSH(cfg, [`rm -rf ${remoteBase(cfg)}/saves/${validate(gameId)}/${ts}`]);
-  }
-  if (extra.length) return extra.length;
-  return 0;
-}
-
-// --- public API --------------------------------------------------------------
-
 function localSaveState(cfg, gameId) {
   const game = cfg.games?.[gameId];
   if (!game) throw new GamelibError(`game '${gameId}' is not configured locally`);
@@ -267,7 +143,7 @@ function localSaveState(cfg, gameId) {
     else missing.push(d);
   }
   return {
-    dirs: resolved, missing, dirty: !missing.length && dirs.length > 0,
+    dirs: [...new Set(resolved)], missing, dirty: !missing.length && dirs.length > 0,
     newestLocal: Math.max(0, ...resolved.map((d) => newestFileMtime(d))),
   };
 }
@@ -319,8 +195,9 @@ async function gameStatus(cfg, gameId, lib) {
   };
 }
 
+// --- public API --------------------------------------------------------------
+
 async function status(cfg) {
-  await ensureServer(cfg);
   const lib = await readLibrary(cfg);
   const ids = new Set([...Object.keys(lib.games || {}), ...Object.keys(cfg.games || {})]);
   const games = [];
@@ -339,9 +216,6 @@ async function savePush(cfg, gameId) {
   const id = validate(gameId);
   const local = localSaveState(cfg, id);
   if (local.missing.length) throw new GamelibError(`save dirs missing locally: ${local.missing.join(', ')}`);
-  // Guard: two configured dirs may resolve to the same real folder (e.g.
-  // symlinked alias) — archiving it once prevents duplicate junk snapshots.
-  local.dirs = [...new Set(local.dirs)];
   const ts = snapshotTs();
   const base = `saves/${id}/${ts}`;
   const meta = {
@@ -363,17 +237,8 @@ async function savePush(cfg, gameId) {
       tar.stderr.on('data', (d) => (err += d));
       tar.on('close', (c) => (c === 0 ? resolve() : reject(new GamelibError(`tar failed: ${err.trim()}`))));
     });
-    await new Promise((resolve, reject) => {
-      // Stream the archive up, then write meta in the same connection run.
-      const remote = spawn('ssh', [...sshArgs(cfg),
-        `mkdir -p ${remoteBase(cfg)}/${base} && cat > ${remoteBase(cfg)}/${base}/saves.tar.gz`],
-        { stdio: ['pipe', 'pipe', 'pipe'] });
-      let err = '';
-      remote.stderr.on('data', (d) => (err += d));
-      fs.createReadStream(tmp).pipe(remote.stdin);
-      remote.on('close', (c) => (c === 0 ? resolve() : reject(new GamelibError(`upload failed: ${err.trim()}`))));
-    });
-    await writeRemoteFile(cfg, `${base}/meta.json`, JSON.stringify(meta, null, 2));
+    await transport.uploadFile(cfg, `/api/${base}/saves.tar.gz`, tmp);
+    await transport.api(cfg, 'PUT', `/api/${base}/meta.json`, { body: JSON.stringify(meta, null, 2) });
     const pruned = await pruneSnapshots(cfg, id);
     return { snapshot: ts, pruned };
   } finally {
@@ -394,7 +259,7 @@ async function savePull(cfg, gameId, { backupLocal = true } = {}) {
 
   const tmp = path.join(os.tmpdir(), `gamelib-save-${id}-${cloud.ts}.tar.gz`);
   try {
-    await pullFile(cfg, `saves/${id}/${cloud.ts}/saves.tar.gz`, tmp);
+    await transport.downloadFile(cfg, `/api/saves/${id}/${cloud.ts}/saves.tar.gz`, tmp);
     for (const d of local.dirs) {
       const dest = resolveDir(d);
       if (!dest) throw new GamelibError(`save dir unavailable: ${d}`);
@@ -416,7 +281,20 @@ async function publishGame(cfg, gameId, dir, { name, os } = {}) {
   const tag = ['linux', 'windows', 'darwin'].includes(os) ? os : osTag();
   const src = resolveDir(dir);
   if (!src) throw new GamelibError(`publish source not found: ${dir}`);
-  await pushTar(cfg, src, `games/${id}/${tag}.tar`, { compress: false });
+  const tmp = path.join(os.tmpdir(), `gamelib-publish-${id}-${tag}.tar`);
+  try {
+    await new Promise((resolve, reject) => {
+      const parent = path.dirname(src);
+      const namePart = path.basename(src);
+      const tar = spawn('tar', ['-chf', tmp, '-C', parent, namePart], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let err = '';
+      tar.stderr.on('data', (d) => (err += d));
+      tar.on('close', (c) => (c === 0 ? resolve() : reject(new GamelibError(`tar failed: ${err.trim()}`))));
+    });
+    await transport.uploadFile(cfg, `/api/games/${id}/${tag}.tar`, tmp);
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
   const lib = await readLibrary(cfg);
   lib.games = lib.games || {};
   const entry = lib.games[id] || { platforms: {} };
@@ -435,7 +313,14 @@ async function installGame(cfg, gameId) {
   const dest = installPath(cfg, id);
   if (!dest) throw new GamelibError(`no install path configured for '${id}' on ${tag}`);
   fs.mkdirSync(dest, { recursive: true });
-  await pullTar(cfg, `cat ${remoteBase(cfg)}/games/${id}/${tag}.tar`, dest, { compress: false });
+  await new Promise((resolve, reject) => {
+    const tar = spawn('tar', ['-xf', '-', '--strip-components=1', '-C', dest], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let err = '';
+    tar.stderr.on('data', (d) => (err += d));
+    transport.downloadTo(cfg, `/api/games/${id}/${tag}.tar`, tar)
+      .then(() => tar.on('close', (c) => (c === 0 ? resolve() : reject(new GamelibError(`extract failed: ${err.trim()}`)))))
+      .catch(reject);
+  });
   fs.writeFileSync(path.join(dest, '.gamelib.json'),
     JSON.stringify({ game: id, os: tag, installedAt: new Date().toISOString() }, null, 2));
   return { id, dest };
@@ -482,6 +367,7 @@ function openSaveFolder(cfg, gameId) {
   const local = localSaveState(cfg, gameId);
   if (!local.dirs.length) throw new GamelibError(`no save dirs for '${gameId}' on this machine`);
   const dir = local.dirs[0];
+  const { execFile } = require('node:child_process');
   if (process.platform === 'win32') execFile('explorer.exe', [dir]);
   else execFile('xdg-open', [dir]);
   return dir;
@@ -490,6 +376,6 @@ function openSaveFolder(cfg, gameId) {
 module.exports = {
   GamelibError, GAME_ID_RE, osTag, configDir, defaultConfigPath,
   loadConfig, saveConfig, expandPath, resolveDir,
-  ensureServer, readLibrary, writeLibrary, status, savePush, savePull,
+  readLibrary, writeLibrary, status, savePush, savePull,
   publishGame, installGame, play, openSaveFolder, snapshotTs,
 };
