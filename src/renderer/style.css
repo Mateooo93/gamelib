@@ -132,6 +132,7 @@ nav { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; }
   background: var(--panel-2); color: var(--text-dim); border: 1px solid var(--line);
 }
 .chip.on { color: var(--accent); }
+.chip.up-to-date { color: var(--green); background: var(--green-bg); border: 1px solid #6b8712; }
 
 .card-stats { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-dim); }
 .card-stats b { color: var(--text); font-weight: 600; }

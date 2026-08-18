@@ -260,6 +260,7 @@ let updateInfo = null;
 let updateDownloading = false;
 
 async function checkForUpdate(quiet = false) {
+  const chip = $('#ver-chip');
   try {
     const r = await api.updateCheck();
     updateInfo = r.ok ? r : null;
@@ -270,7 +271,14 @@ async function checkForUpdate(quiet = false) {
   if (updateInfo && updateInfo.available && !updateDownloading) {
     btn.textContent = `⬆ Update ${updateInfo.latestVersion.replace(/^v/, '')}`;
     btn.classList.remove('hidden');
+    chip.classList.add('hidden');
+  } else if (updateInfo && updateInfo.latestVersion && state.version) {
+    const same = state.version.replace(/^v/, '') === updateInfo.latestVersion.replace(/^v/, '');
+    chip.textContent = same ? `v${state.version} · up to date` : `v${state.version} · latest: ${updateInfo.latestVersion.replace(/^v/, '')}`;
+    chip.classList.remove('hidden');
+    btn.classList.add('hidden');
   } else {
+    chip.classList.add('hidden');
     btn.classList.add('hidden');
   }
 }
@@ -320,6 +328,7 @@ api.onEvent((ev) => {
     const r = await api.cfgGet();
     state.cfg = r.cfg;
     state.configPath = r.configPath;
+    state.version = r.version;
     fillSettings();
     await refresh(true);
   } catch (e) {

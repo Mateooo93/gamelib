@@ -67,7 +67,7 @@ const wrap = (fn) => async (_e, args) => {
 
 ipcMain.handle('cfg:get', () => {
   const cfg = engine.loadConfig();
-  return ok({ cfg, configPath: engine.defaultConfigPath(), os: process.platform });
+  return ok({ cfg, configPath: engine.defaultConfigPath(), os: process.platform, version: app.getVersion() });
 });
 
 ipcMain.handle('cfg:save', wrap(async ({ server, machine, githubToken }) => {
