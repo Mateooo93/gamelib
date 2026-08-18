@@ -77,18 +77,29 @@ async function api(cfg, method, apiPath, { json, body } = {}) {
 
 function uploadFile(cfg, apiPath, filePath) {
   return new Promise((resolve, reject) => {
-    request(cfg, 'PUT', apiPath).then((r) => {
-      if (r.status >= 400) {
-        r.stream.resume();
-        return reject(new TransportError(`upload failed (HTTP ${r.status})`));
-      }
-      const src = fs.createReadStream(filePath);
-      src.pipe(r.stream);
-      src.on('error', (e) => reject(new TransportError(`upload failed: ${e.message}`)));
-      r.stream.on('error', (e) => reject(new TransportError(`upload failed: ${e.message}`)));
-      r.stream.on('end', () => resolve());
-      r.stream.on('close', () => resolve());
-    }).catch(reject);
+    const s = cfg.server || {};
+    const url = new URL(baseUrl(cfg) + apiPath);
+    const ca = fs.existsSync(certPath()) ? fs.readFileSync(certPath()) : null;
+    if (!ca) return reject(new TransportError(`server certificate not found at ${certPath()} — run the server setup first`));
+    let size = 0;
+    try { size = fs.statSync(filePath).size; } catch (e) { return reject(new TransportError(`upload source missing: ${filePath}`)); }
+    const req = https.request(url, {
+      method: 'PUT',
+      ca,
+      headers: {
+        Authorization: `Bearer ${s.password}`,
+        'User-Agent': 'gamelib-client',
+        'Content-Length': size,
+      },
+    });
+    req.on('error', (e) => reject(new TransportError(`server unreachable (${url.host}): ${e.message}`)));
+    req.on('response', (res) => {
+      res.resume();
+      res.on('end', () => (res.statusCode >= 400
+        ? reject(new TransportError(`upload failed (HTTP ${res.statusCode})`))
+        : resolve()));
+    });
+    fs.createReadStream(filePath).pipe(req);
   });
 }
 

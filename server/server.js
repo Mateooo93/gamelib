@@ -30,7 +30,7 @@ function loadConfig() {
 const config = loadConfig();
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const TS_RE = /^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$/;
-const TAG_RE = /^[A-Za-z0-9_-]{1,32}$/;
+const TAG_RE = /^[A-Za-z0-9_.-]{1,48}$/;
 const SNAPSHOT_LIMIT = 20;
 
 function ensureLayout() {

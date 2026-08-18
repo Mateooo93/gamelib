@@ -29,7 +29,7 @@ async function main(argv) {
   switch (cmd) {
     case 'status': {
       const s = await engine.status(cfg);
-      console.log(`server: ${s.server.user}@${s.server.host}  machine: ${s.machine}`);
+      console.log(`server: ${s.server.host}:${s.server.port} (password auth)  machine: ${s.machine}`);
       for (const g of s.games) {
         const inst = g.installed ? 'installed' : 'not installed';
         const saves = {
